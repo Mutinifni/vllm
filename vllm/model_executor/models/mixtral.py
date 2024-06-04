@@ -219,11 +219,14 @@ class MixtralMoE(nn.Module):
             self.a2_scale = nn.Parameter(self.a2_scale.max(),
                                          requires_grad=False)
 
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+    def forward(self, hidden_states: torch.Tensor, warmup: bool=False) -> torch.Tensor:
         num_tokens, hidden_size = hidden_states.shape
         hidden_states = hidden_states.view(-1, self.hidden_size)
         # router_logits: (num_tokens, n_experts)
         router_logits, _ = self.gate(hidden_states)
+        if not warmup and torch.cuda.current_device() == 0:
+            # print the selected expert ids for each token
+            print(router_logits.topk(self.top_k, dim=-1)[1].cpu().tolist())
         final_hidden_states = fused_moe(hidden_states,
                                         self.w13_weight,
                                         self.w2_weight,
@@ -312,6 +315,7 @@ class MixtralAttention(nn.Module):
         hidden_states: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata: AttentionMetadata,
+        warmup: bool=False,
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
@@ -359,6 +363,7 @@ class MixtralDecoderLayer(nn.Module):
         kv_cache: torch.Tensor,
         attn_metadata: AttentionMetadata,
         residual: Optional[torch.Tensor],
+        warmup: bool=False,
     ) -> torch.Tensor:
         # Self Attention
         if residual is None:
@@ -372,6 +377,7 @@ class MixtralDecoderLayer(nn.Module):
             hidden_states=hidden_states,
             kv_cache=kv_cache,
             attn_metadata=attn_metadata,
+            warmup=warmup,
         )
 
         # Fully Connected
@@ -416,6 +422,7 @@ class MixtralModel(nn.Module):
         positions: torch.Tensor,
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
+        warmup: bool=False,
     ) -> torch.Tensor:
         hidden_states = self.embed_tokens(input_ids)
         residual = None
@@ -423,7 +430,7 @@ class MixtralModel(nn.Module):
             layer = self.layers[i]
             hidden_states, residual = layer(positions, hidden_states,
                                             kv_caches[i], attn_metadata,
-                                            residual)
+                                            residual, warmup=warmup)
         hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states
 
@@ -480,6 +487,7 @@ class MixtralForCausalLM(nn.Module):
         self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
                                                 config.vocab_size)
         self.sampler = Sampler()
+        self.warmup = True
 
     def forward(
         self,
@@ -487,9 +495,14 @@ class MixtralForCausalLM(nn.Module):
         positions: torch.Tensor,
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
+        warmup: bool=False,
     ) -> torch.Tensor:
+        if not self.warmup and torch.cuda.current_device() == 0:
+            print("input_ids:", input_ids.cpu().tolist())
+            print("positions:", positions.cpu().tolist())
         hidden_states = self.model(input_ids, positions, kv_caches,
-                                   attn_metadata)
+                                   attn_metadata, warmup=self.warmup)
+        self.warmup = False
         return hidden_states
 
     def compute_logits(self, hidden_states: torch.Tensor,

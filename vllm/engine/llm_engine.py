@@ -481,6 +481,8 @@ class LLMEngine:
             prompt_token_ids = tokenizer.encode(request_id=request_id,
                                                 prompt=inputs["prompt"],
                                                 lora_request=lora_request)
+            print(f"prompt token ids for {request_id}:")
+            print(prompt_token_ids)
         else:
             prompt_token_ids = inputs["prompt_token_ids"]
 
